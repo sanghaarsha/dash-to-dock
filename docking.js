@@ -708,7 +708,10 @@ const DockedDash = GObject.registerClass({
         ], [
             settings,
             'changed::autohide-in-fullscreen',
-            this._updateBarrier.bind(this),
+            () => {
+                this._updateBarrier();
+                DockManager.getDefault()?._updateUnredirect();
+            },
         ], [
             settings,
             'changed::show-dock-urgent-notify',
@@ -744,9 +747,9 @@ const DockedDash = GObject.registerClass({
 
     get inhibitsUnredirection() {
         // Composition is needed while the dock is animating or is shown on top
-        // of a fullscreen window of its monitor.
-        // Otherwise the compositor-wide inhibition would prevent fullscreen
-        // windows in other monitors to run in direct rendering mode.
+        // of a window of its monitor (maximized, overlapping, or fullscreen).
+        // Otherwise the compositor-wide inhibition would prevent windows
+        // from being scanned out directly when the dock is hidden.
         if (!this.visible)
             return false;
 
@@ -754,7 +757,11 @@ const DockedDash = GObject.registerClass({
         case State.SHOWING:
         case State.HIDING:
         case State.SHOWN:
-            return !!this._monitor?.inFullscreen;
+            if (this._monitor?.inFullscreen)
+                return DockManager.settings.autohideInFullscreen;
+
+            return (this.intellihideEnabled && this._intellihide.getOverlapStatus()) ||
+                (this.autohideEnabled && !DockManager.settings.dockFixed);
         default:
             return false;
         }
@@ -862,6 +869,10 @@ const DockedDash = GObject.registerClass({
             // Skip if dock is not in autohide mode for instance because it is shown
             // by intellihide.
             if (this.autohideEnabled) {
+                if (this._monitor?.inFullscreen &&
+                    !DockManager.settings.autohideInFullscreen)
+                    return;
+
                 if (this._box.hover || Main.overview.visible)
                     this.showDock();
                 else
@@ -872,6 +883,10 @@ const DockedDash = GObject.registerClass({
 
     showDock() {
         if (DockManager.settings.manualhide)
+            return;
+
+        if (this._monitor?.inFullscreen &&
+            !DockManager.settings.autohideInFullscreen)
             return;
 
         this._delayedHide = false;
@@ -2290,6 +2305,14 @@ export class DockManager {
             dock,
             'notify::visible',
             () => this._updateUnredirect(),
+        ], [
+            dock,
+            'notify::intellihide-enabled',
+            () => this._updateUnredirect(),
+        ], [
+            dock,
+            'notify::autohide-enabled',
+            () => this._updateUnredirect(),
         ]);
 
         const id = dock.connect('destroy', () => {
@@ -2297,6 +2320,7 @@ export class DockManager {
             const index = this._allDocks.indexOf(dock);
             if (index !== -1)
                 this._allDocks.splice(index, 1);
+            this._updateUnredirect();
         });
 
         return dock;
